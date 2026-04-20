@@ -1,0 +1,46 @@
+name: Sync from sullrich/ah4c
+
+# Manual only. Click "Run workflow" on GitHub when you want to pull upstream.
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "Upstream branch to merge"
+        required: false
+        default: "main"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge sullrich/ah4c ${{ inputs.upstream_ref }}
+        run: |
+          git remote add upstream https://github.com/sullrich/ah4c.git
+          git fetch upstream "${{ inputs.upstream_ref }}"
+          # No --ff-only: we want a merge commit if upstream diverged so the
+          # one-line WrapEncoderBody patch is preserved. Conflict = loud failure,
+          # which is what we want (it means upstream touched our patched line).
+          git merge --no-edit "upstream/${{ inputs.upstream_ref }}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Verify build (patch still compiles)
+        run: docker build -f Dockerfile -t ah4c-mackid1993:sync-verify .
+
+      - name: Push merged commit
+        run: git push origin HEAD

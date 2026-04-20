@@ -19,10 +19,16 @@ RUN git clone https://github.com/NetrisTV/ws-scrcpy.git . \
 WORKDIR /ws-scrcpy/dist
 RUN npm install
 
-# Build ah4c application
+# Build ah4c application from this fork's source.
+# main.go is kept in sync with upstream via .github/workflows/sync-upstream.yml;
+# the only local patch is one line in tune() that calls WrapEncoderBody from
+# stall_tolerant_reader.go. If upstream ever touches that line the sync
+# workflow surfaces a merge conflict instead of silently losing the patch.
 WORKDIR /go/src/github.com/sullrich
-RUN git clone https://github.com/sullrich/ah4c . \
-    && go build -o /opt/ah4c
+COPY go.mod go.sum ./
+RUN go mod download
+COPY *.go ./
+RUN go build -o /opt/ah4c
 
 # Second Stage: Create the Runtime Environment
 FROM debian:bookworm-slim AS runner

@@ -402,7 +402,7 @@ func tune(idx, channel string) (io.ReadCloser, error) {
 			t.active = true
 			t.index = i
 			return &reader{
-				ReadCloser: resp.Body,
+				ReadCloser: WrapEncoderBody(resp.Body, t.url, t.tunerip),
 				channel:    channel,
 				t:          t,
 			}, nil
