@@ -1,4 +1,11 @@
-#docker buildx build --platform linux/amd64,linux/arm64 -f Dockerfile -t bnhf/ah4c:latest -t bnhf/ah4c:2025.08.31 . --push --no-cache
+#docker buildx build --platform linux/amd64 -f Dockerfile -t ghcr.io/mackid1993/ah4c-mackid1993:latest . --push
+
+# This fork is a thin patch overlay on sullrich/ah4c.
+# upstream/        — git submodule pointing at sullrich/ah4c
+# patches/tune.patch — the fallback patch for PR #9
+# stall_tolerant_reader.go — new Go file copied into the build
+# If upstream changes the lines the patch touches, `git apply` fails and the
+# whole build errors out. That is the desired signal.
 
 # First Stage: Build ws-scrcpy and ah4c
 FROM golang:bookworm AS builder
@@ -19,16 +26,13 @@ RUN git clone https://github.com/NetrisTV/ws-scrcpy.git . \
 WORKDIR /ws-scrcpy/dist
 RUN npm install
 
-# Build ah4c application from this fork's source.
-# main.go is kept in sync with upstream via .github/workflows/sync-upstream.yml;
-# the only local patch is one line in tune() that calls WrapEncoderBody from
-# stall_tolerant_reader.go. If upstream ever touches that line the sync
-# workflow surfaces a merge conflict instead of silently losing the patch.
+# Build ah4c from the pinned upstream submodule + our patches
 WORKDIR /go/src/github.com/sullrich
-COPY go.mod go.sum ./
-RUN go mod download
-COPY *.go ./
-RUN go build -o /opt/ah4c
+COPY upstream/ ./
+COPY patches/ /tmp/patches/
+COPY stall_tolerant_reader.go ./
+RUN git apply --verbose /tmp/patches/tune.patch \
+    && go build -o /opt/ah4c
 
 # Second Stage: Create the Runtime Environment
 FROM debian:bookworm-slim AS runner
@@ -67,13 +71,13 @@ WORKDIR /opt
 COPY --from=builder /ws-scrcpy/dist /opt/ws-scrcpy
 COPY --from=builder /opt/ah4c /opt/ah4c
 
-# Copy necessary scripts and static files
-COPY docker-start.sh adbpackages.sh /opt/
-COPY scripts /tmp/scripts/
-COPY m3u/* /tmp/m3u/
-COPY html/* /opt/html/
+# Copy upstream runtime assets (scripts, html, static, etc.) from the submodule
+COPY upstream/docker-start.sh upstream/adbpackages.sh /opt/
+COPY upstream/scripts/ /tmp/scripts/
+COPY upstream/m3u/ /tmp/m3u/
+COPY upstream/html/ /opt/html/
 RUN sed -i '/href="\/config"/d; /href="\/env"/d' /opt/html/index.html
-COPY static /opt/static/
+COPY upstream/static/ /opt/static/
 
 # Ensure start script is executable
 RUN chmod +x /opt/docker-start.sh \

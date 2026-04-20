@@ -1,0 +1,38 @@
+name: Test patch
+
+# Runs on every push / PR and via manual dispatch. Verifies:
+#   1. patches/tune.patch cleanly applies to the pinned upstream submodule
+#   2. the full Docker image builds (Go compiles with the patch + reader)
+# If upstream drifts and the patch no longer applies, this workflow goes red.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Dry-run patch against submodule
+        working-directory: upstream
+        run: git apply --check --verbose ../patches/tune.patch
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (patch must apply + Go must compile)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

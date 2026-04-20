@@ -1,48 +1,40 @@
-#docker buildx build --platform linux/amd64,linux/arm64 -f Dockerfile-pyatv -t bnhf/ah4c:appletv . --push --no-cache
+#docker buildx build --platform linux/amd64 -f Dockerfile-pyatv -t ghcr.io/mackid1993/ah4c-mackid1993:pyatv . --push
 
-# Build ah4c application in 2nd stage
-#FROM golang:alpine3.14 AS builder2
+# See Dockerfile for the patch-overlay model (submodule + patches/).
+
 FROM golang:alpine3.21 AS builder2
 
-# Set working directory
 RUN mkdir -p /go/src/github.com/sullrich
 WORKDIR /go/src/github.com/sullrich
 
-# Install build deps, then build ah4c from this fork's source.
-# See Dockerfile for the maintenance model (one-line patch in main.go,
-# everything else lives in stall_tolerant_reader.go).
 RUN apk upgrade --no-cache && apk add --no-cache git
-COPY go.mod go.sum ./
-RUN go mod download
-COPY *.go ./
-RUN go build -o /opt/ah4c
 
-# Copy files from local workspace
-COPY docker-start-pyatv.sh /opt/
-COPY scripts /tmp/scripts/
-COPY m3u/* /tmp/m3u/
-COPY html/* /opt/html/
-COPY static /opt/static/
+COPY upstream/ ./
+COPY patches/ /tmp/patches/
+COPY stall_tolerant_reader.go ./
+RUN git apply --verbose /tmp/patches/tune.patch \
+    && go build -o /opt/ah4c
 
-# Build combined ah4c with ws-scrcpy
+# Copy upstream runtime assets from the submodule
+COPY upstream/docker-start-pyatv.sh /opt/
+COPY upstream/scripts/ /tmp/scripts/
+COPY upstream/m3u/ /tmp/m3u/
+COPY upstream/html/ /opt/html/
+COPY upstream/static/ /opt/static/
+
 FROM ghcr.io/postlund/pyatv:0.14.5 AS runner
 LABEL maintainer="The Slayer <slayer@technologydragonslayer.com>"
 
-# Set working directory
 RUN mkdir -p /opt/scripts /tmp/scripts /tmp/m3u /opt/html /opt/static
 WORKDIR /opt
 
-# Install dependencies
 RUN apk upgrade --no-cache \
     && apk add --no-cache android-tools curl npm bash bind-tools ffmpeg procps nano tzdata tesseract-ocr
 
-# Copy files from builders
 COPY --from=builder2 /opt /opt
 COPY --from=builder2 /tmp /tmp
 
-# Expose needed ports
 EXPOSE 7654
 EXPOSE 8000
 
-# Run start script
 CMD ["./docker-start-pyatv.sh"]
