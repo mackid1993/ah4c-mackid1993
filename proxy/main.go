@@ -4,19 +4,21 @@
 //
 // On each ah4c tune request we:
 //   1. WriteHeader(200) immediately so ah4c's http.Get doesn't block.
-//   2. WAIT tuneSettleDelay (default 2s). This gives ah4c time to run
-//      prebmitune (synchronous in ah4c's tune()) and bmitune (fired as a
-//      goroutine from the first reader.Read). With both scripts done,
-//      the encoder is on the target channel before we pull any bytes.
+//   2. Watch /proc for the bmitune.sh process matching this tuner's IP,
+//      and wait until it exits. That is the actual, authoritative signal
+//      that the encoder is on the target channel — no fixed timer, no
+//      guessing per-hardware. Falls back to a brief safety delay if the
+//      script can't be detected (already finished, atypical setup).
 //   3. Open the encoder connection and stream through a stallTolerantReader
 //      for continued resilience (mid-stream encoder reboots, etc.).
 //
 // This replicates the effective behavior of PR #9's prebmitune-before-
-// http.Get reorder without touching ah4c source. Override the delay with
-// STALL_PROXY_TUNE_DELAY_MS if your scripts take longer than 2s.
+// http.Get reorder without touching ah4c source, and adapts to whatever
+// duration the user's bmitune.sh actually takes.
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -29,8 +31,10 @@ import (
 
 const (
 	listenAddr          = "127.0.0.1:47811"
-	defaultSettleDelay  = 2 * time.Second
-	settleDelayEnvVar   = "STALL_PROXY_TUNE_DELAY_MS"
+	defaultMaxTuneWait  = 30 * time.Second
+	bmituneScanWindow   = 3 * time.Second // how long to look for bmitune to appear before giving up
+	bmituneFallbackWait = 500 * time.Millisecond
+	maxWaitEnvVar       = "STALL_PROXY_TUNE_DELAY_MS" // total time budget for the bmitune wait
 )
 
 func main() {
@@ -40,29 +44,24 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	// Kernel default TCP buffers — with the settle delay in place there is
-	// no pre-read accumulation to worry about, so a generous socket buffer
-	// just gives more throughput headroom if ah4c's drain rate blips
-	// (GC pauses, scheduler stalls, etc.), preventing the rare slow-motion
-	// playback moment that tight buffers were causing.
 	srv := &http.Server{
 		Addr:              listenAddr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	log.Printf("stall_proxy listening on %s (tune settle delay %s)", listenAddr, settleDelay())
+	log.Printf("stall_proxy listening on %s (max bmitune wait %s)", listenAddr, maxTuneWait())
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func settleDelay() time.Duration {
-	if v := os.Getenv(settleDelayEnvVar); v != "" {
+func maxTuneWait() time.Duration {
+	if v := os.Getenv(maxWaitEnvVar); v != "" {
 		if ms, err := strconv.Atoi(v); err == nil && ms >= 0 {
 			return time.Duration(ms) * time.Millisecond
 		}
 	}
-	return defaultSettleDelay
+	return defaultMaxTuneWait
 }
 
 func handleTuner(w http.ResponseWriter, r *http.Request) {
@@ -90,21 +89,11 @@ func handleTuner(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	// 2. Wait for ah4c's prebmitune + bmitune to settle before connecting
-	// to the encoder. Without this delay the proxy pulls bytes from the
-	// old channel, then the channel switches mid-stream and DVR's demuxer
-	// has to re-lock PAT/PMT — which it often does by dropping audio.
-	delay := settleDelay()
-	log.Printf("[%s] waiting %s for ah4c tune scripts to settle", label, delay)
-	select {
-	case <-time.After(delay):
-	case <-ctx.Done():
-		log.Printf("[%s] client disconnected during settle delay", label)
-		return
-	}
+	// 2. Wait for bmitune.sh (this tuner's channel-change script) to finish.
+	waitForBmituneExit(ctx, n, label, maxTuneWait())
 
-	// 3. Connect and stream. By now the encoder is on the target channel,
-	// so bytes going to DVR are clean from the first packet.
+	// 3. Connect and stream. Encoder is now on the target channel.
+	log.Printf("[%s] bmitune settled; connecting to encoder %s", label, upstream)
 	reader := newStallTolerantReader(nil, func() (io.ReadCloser, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstream, nil)
 		if err != nil {
@@ -145,5 +134,98 @@ func handleTuner(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+	}
+}
+
+// waitForBmituneExit polls /proc for bmitune.sh matching TUNER<N>_IP and
+// blocks until that process exits or the total budget elapses. If the
+// script can't be located within bmituneScanWindow the function falls
+// back to a brief sleep — bmitune may have run too fast to catch, or the
+// env vars needed to identify it aren't set.
+func waitForBmituneExit(ctx context.Context, tunerN, label string, budget time.Duration) {
+	tunerIP := os.Getenv("TUNER" + tunerN + "_IP")
+	streamerApp := os.Getenv("STREAMER_APP")
+	if tunerIP == "" || streamerApp == "" {
+		log.Printf("[%s] TUNER%s_IP or STREAMER_APP unset — %s safety delay", label, tunerN, bmituneFallbackWait)
+		sleepWithCtx(ctx, bmituneFallbackWait)
+		return
+	}
+	needleScript := streamerApp + "/bmitune.sh"
+	needleIP := tunerIP
+
+	deadline := time.Now().Add(budget)
+	scanDeadline := time.Now().Add(bmituneScanWindow)
+	if scanDeadline.After(deadline) {
+		scanDeadline = deadline
+	}
+
+	// Phase 1: wait for bmitune.sh to appear in /proc.
+	var pid int
+	for time.Now().Before(scanDeadline) {
+		if ctx.Err() != nil {
+			return
+		}
+		pid = findBmituneProcess(needleScript, needleIP)
+		if pid > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if pid == 0 {
+		log.Printf("[%s] bmitune.sh not detected within %s — %s safety delay", label, bmituneScanWindow, bmituneFallbackWait)
+		sleepWithCtx(ctx, bmituneFallbackWait)
+		return
+	}
+	log.Printf("[%s] bmitune.sh pid=%d running; waiting for exit", label, pid)
+
+	// Phase 2: wait for that PID to exit.
+	start := time.Now()
+	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			return
+		}
+		if !processExists(pid) {
+			log.Printf("[%s] bmitune.sh exited after %s", label, time.Since(start).Round(time.Millisecond))
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	log.Printf("[%s] bmitune.sh still running after %s budget — proceeding anyway", label, budget)
+}
+
+func findBmituneProcess(needleScript, needleIP string) int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		data, err := os.ReadFile("/proc/" + e.Name() + "/cmdline")
+		if err != nil {
+			continue
+		}
+		cmd := string(data)
+		if strings.Contains(cmd, needleScript) && strings.Contains(cmd, needleIP) {
+			return pid
+		}
+	}
+	return 0
+}
+
+func processExists(pid int) bool {
+	_, err := os.Stat("/proc/" + strconv.Itoa(pid))
+	return err == nil
+}
+
+func sleepWithCtx(ctx context.Context, d time.Duration) {
+	select {
+	case <-time.After(d):
+	case <-ctx.Done():
 	}
 }

@@ -19,7 +19,7 @@ ah4c's `tune()` calls `http.Get(ENCODER<N>_URL)` as usual; the proxy is transpar
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `STALL_PROXY_TUNE_DELAY_MS` | `2000` | Milliseconds the proxy waits after accepting a tune request before connecting to the real encoder. Must be long enough for ah4c's `prebmitune` (synchronous) plus `bmitune` (async goroutine from the first `reader.Read`) to finish. Bump this if your encoder's channel-switch script takes longer than 2 seconds. `0` disables the delay. |
+| `STALL_PROXY_TUNE_DELAY_MS` | `30000` | Maximum milliseconds the proxy will wait for `bmitune.sh` (your channel-switch script) to exit before connecting to the encoder. The proxy watches `/proc` for a `bmitune.sh` process matching this tuner's `TUNER<N>_IP` and connects the moment that process exits — no wasted time on warm tunes, no reconnect+relock drama on slow ones. You rarely need to touch this; 30s is a ceiling, not a fixed delay. |
 
 All other upstream ah4c env vars (`NUMBER_TUNERS`, `ENCODER<N>_URL`, `TUNER<N>_IP`, `CMD<N>`, `TEECMD<N>`, `STREAMER_APP`, etc.) work exactly as documented in the upstream README.
 
@@ -71,6 +71,7 @@ SIGTERM / SIGINT from Docker are forwarded to both children for clean shutdown.
 
 ## Tuning tips
 
-- If DVR shows buffering / behind-timeline on first tune: `STALL_PROXY_TUNE_DELAY_MS` may be too short for your hardware's script timing. Bump in increments of 500ms.
-- If warm-tune latency feels excessive: your scripts finish fast — try `STALL_PROXY_TUNE_DELAY_MS=1000` or `500`.
-- The proxy adds zero latency in steady state once streaming; the delay only applies at tune start.
+- The proxy watches `bmitune.sh`'s process lifetime via `/proc` and connects the moment the script exits. Fast tunes finish fast, slow tunes wait exactly as long as they need — no manual tuning required.
+- If the proxy logs `bmitune.sh not detected within 3s` the script ran too fast to catch, or `STREAMER_APP` / `TUNER<N>_IP` aren't in the proxy's environment. A 500ms safety delay is applied in that case. Verify those env vars are set if you see it consistently.
+- `STALL_PROXY_TUNE_DELAY_MS` is a ceiling, not a fixed delay. If bmitune legitimately takes longer than 30s, raise it.
+- The proxy adds zero latency in steady state once streaming; the wait only happens at tune start.
