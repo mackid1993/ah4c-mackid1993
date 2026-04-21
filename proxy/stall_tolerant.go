@@ -103,7 +103,7 @@ func (s *stallTolerantReader) producer() {
 	lastRealBytes := time.Now()
 	haveConnectedOnce := false
 	giveUp := func(reason string) {
-		log.Printf("[%s] %s; closing reader so DVR sees EOF", s.label, reason)
+		log.Printf("[%s] %s; giving up and ending stream", s.label, reason)
 		s.closeOnce.Do(func() { close(s.closed) })
 	}
 	for {
