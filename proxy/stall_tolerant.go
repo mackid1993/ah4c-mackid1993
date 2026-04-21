@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,12 +26,14 @@ var nullTSPacket = func() [188]byte {
 }()
 
 const (
-	stallReadGap         = 500 * time.Millisecond
-	srcStallReconnect    = 5 * time.Second
-	srcReconnectBackoff  = 2 * time.Second
-	maxUnhealthyDuration = 15 * time.Second
-	chunkSize            = 32 * 1024
-	queueDepth           = 64
+	stallReadGap          = 500 * time.Millisecond
+	firstChunkGap         = 15 * time.Second // how long Read() waits for the first real chunk before giving up as EOF
+	srcStallReconnect     = 5 * time.Second
+	srcReconnectBackoff   = 2 * time.Second
+	maxUnhealthyDuration  = 15 * time.Second
+	chunkSize             = 32 * 1024
+	queueDepth            = 64
+	reconnectLogThrottle  = 10 * time.Second
 )
 
 // stallTolerantReader wraps an HTTP response body so downstream consumers
@@ -38,14 +41,23 @@ const (
 // cold, stalled, or cycling. Warm streams pass through untouched: bytes go
 // producer->queue->Read() with sub-millisecond overhead. Only when the queue
 // has been empty for stallReadGap (500ms) do NULL TS packets fill in.
+//
+// First-chunk gate: Read() refuses to emit NULLs until the producer has
+// delivered at least one real chunk. This matches the effective behavior of
+// PR #9's reader in ah4c's source, where the first Read() only happened
+// after tune()'s prebmitune finished — by then the producer had filled the
+// queue, so the 500ms timer never fired at startup. The proxy invokes
+// Read() immediately on HTTP request instead, so without this gate DVR
+// would see a NULL preamble and lose audio PID lock.
 type stallTolerantReader struct {
-	chunks      chan []byte
-	closed      chan struct{}
-	closeOnce   sync.Once
-	bodyMu      sync.Mutex
-	body        io.ReadCloser
-	reconnectFn func() (io.ReadCloser, error)
-	label       string
+	chunks        chan []byte
+	closed        chan struct{}
+	closeOnce     sync.Once
+	bodyMu        sync.Mutex
+	body          io.ReadCloser
+	reconnectFn   func() (io.ReadCloser, error)
+	label         string
+	hasFirstChunk atomic.Bool
 }
 
 func newStallTolerantReader(body io.ReadCloser, reconnectFn func() (io.ReadCloser, error), label string) *stallTolerantReader {
@@ -80,9 +92,17 @@ func (s *stallTolerantReader) producer() {
 		s.bodyMu.Lock()
 		body := s.body
 		s.bodyMu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), srcStallReconnect)
-		n, err := readWithDeadline(ctx, body, chunk)
-		cancel()
+
+		var n int
+		var err error
+		if body == nil {
+			// No upstream body yet — force an immediate reconnect attempt.
+			err = fmt.Errorf("no upstream body yet")
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), srcStallReconnect)
+			n, err = readWithDeadline(ctx, body, chunk)
+			cancel()
+		}
 		if n > 0 {
 			lastRealBytes = time.Now()
 			data := make([]byte, n)
@@ -97,19 +117,20 @@ func (s *stallTolerantReader) producer() {
 			}
 		}
 		// n == 0 OR err != nil after partial read.
-		if err != nil {
+		if err != nil && body != nil {
 			log.Printf("[%s] source idle/error (%v); reconnecting", s.label, err)
 		}
-		body.Close()
+		if body != nil {
+			body.Close()
+		}
 		if s.reconnectFn == nil {
 			s.closeOnce.Do(func() { close(s.closed) })
 			return
 		}
-		// Try to reconnect. While this loops, DVR keeps getting NULL packets.
-		// The outer-loop budget check handles the "reconnect succeeds repeatedly
-		// but yields no real bytes" case; this inner check handles "reconnect
-		// keeps failing outright".
+		// Try to reconnect. While this loops, DVR keeps getting NULL packets
+		// (once we have delivered a first chunk; before that Read() blocks).
 		var newBody io.ReadCloser
+		lastReconnectLog := time.Time{}
 		for {
 			select {
 			case <-s.closed:
@@ -125,7 +146,11 @@ func (s *stallTolerantReader) producer() {
 				newBody = nb
 				break
 			}
-			log.Printf("[%s] reconnect failed: %v", s.label, rerr)
+			// Throttle log spam during long cold boots.
+			if time.Since(lastReconnectLog) > reconnectLogThrottle {
+				log.Printf("[%s] reconnect failed: %v", s.label, rerr)
+				lastReconnectLog = time.Now()
+			}
 			select {
 			case <-time.After(srcReconnectBackoff):
 			case <-s.closed:
@@ -140,6 +165,24 @@ func (s *stallTolerantReader) producer() {
 }
 
 func (s *stallTolerantReader) Read(p []byte) (int, error) {
+	// Before the first real chunk, block without emitting NULLs so DVR's
+	// demuxer sees a valid PAT/PMT at stream start and locks the audio PID.
+	// If the encoder never produces within firstChunkGap we return EOF so
+	// ah4c can fall through to the next tuner instead of streaming NULLs.
+	if !s.hasFirstChunk.Load() {
+		timer := time.NewTimer(firstChunkGap)
+		defer timer.Stop()
+		select {
+		case <-s.closed:
+			return 0, io.EOF
+		case data := <-s.chunks:
+			s.hasFirstChunk.Store(true)
+			return copy(p, data), nil
+		case <-timer.C:
+			return 0, io.EOF
+		}
+	}
+
 	timer := time.NewTimer(stallReadGap)
 	defer timer.Stop()
 	select {

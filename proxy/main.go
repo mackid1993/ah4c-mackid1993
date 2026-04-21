@@ -2,14 +2,20 @@
 // 127.0.0.1 only. entrypoint.sh rewrites each ENCODER<N>_URL env var to
 // point at this proxy, stashing the original under STALL_PROXY_TUNER_<N>.
 //
-// On each client (ah4c) request, the proxy opens an http.Get to the real
-// encoder *first* — identical to ah4c's own tune() in PR #9. If that call
-// fails, we return 5xx so ah4c falls through to the next tuner exactly
-// like it would without the proxy. On success, we wrap the encoder body
-// with a stallTolerantReader and stream it to ah4c.
+// On each client (ah4c) request we respond 200 immediately and hand back a
+// stallTolerantReader-backed streaming body. The reader's producer opens
+// the real encoder connection in the background; Read() holds until the
+// first real chunk arrives so DVR never sees a NULL-only preamble.
+//
+// This differs architecturally from PR #9's inline wrapper (ah4c's
+// http.Get blocks on the encoder itself) but preserves the observable
+// behavior: warm tunes start fast, cold/stalled tunes see NULL packets
+// only AFTER a real stream has begun, and ah4c's http.Get never hangs
+// past ah4c's own timeouts because we return 200 right away.
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -51,38 +57,28 @@ func handleTuner(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	label := "tuner=" + n
+	ctx := r.Context()
 
-	// Pre-connect to the real encoder, matching ah4c's own tune() flow.
-	// If this fails, return 5xx so ah4c falls through to the next tuner.
-	resp, err := http.Get(upstream)
-	if err != nil {
-		log.Printf("[%s] upstream http.Get failed: %v", label, err)
-		http.Error(w, "upstream unreachable", http.StatusBadGateway)
-		return
-	}
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		log.Printf("[%s] upstream status %s", label, resp.Status)
-		http.Error(w, "upstream status "+resp.Status, http.StatusBadGateway)
-		return
-	}
 	log.Printf("[%s] client connected; upstream=%s", label, upstream)
 
-	reader := newStallTolerantReader(resp.Body, func() (io.ReadCloser, error) {
-		r, e := http.Get(upstream)
-		if e != nil {
-			return nil, e
+	reader := newStallTolerantReader(nil, func() (io.ReadCloser, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstream, nil)
+		if err != nil {
+			return nil, err
 		}
-		if r.StatusCode != http.StatusOK {
-			r.Body.Close()
-			return nil, fmt.Errorf("status %s", r.Status)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
 		}
-		return r.Body, nil
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, fmt.Errorf("status %s", resp.Status)
+		}
+		return resp.Body, nil
 	}, label)
 	defer reader.Close()
 
 	// Stop the reader when ah4c disconnects.
-	ctx := r.Context()
 	go func() {
 		<-ctx.Done()
 		reader.Close()
@@ -96,6 +92,6 @@ func handleTuner(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := io.Copy(w, reader); err != nil {
-		log.Printf("[%s] client stream ended: %v", label, err)
+		log.Printf("[%s] stream ended: %v", label, err)
 	}
 }
