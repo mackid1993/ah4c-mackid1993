@@ -15,7 +15,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git nodejs npm python3 make g++ \
+    git patch nodejs npm python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 
 # Build ws-scrcpy application
@@ -31,7 +31,7 @@ WORKDIR /go/src/github.com/sullrich
 COPY upstream/ ./
 COPY patches/ /tmp/patches/
 COPY stall_tolerant_reader.go ./
-RUN git apply --verbose /tmp/patches/tune.patch \
+RUN patch -p1 --verbose < /tmp/patches/tune.patch \
     && go build -o /opt/ah4c
 
 # Second Stage: Create the Runtime Environment

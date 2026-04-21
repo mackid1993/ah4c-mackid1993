@@ -7,12 +7,12 @@ FROM golang:alpine3.21 AS builder2
 RUN mkdir -p /go/src/github.com/sullrich
 WORKDIR /go/src/github.com/sullrich
 
-RUN apk upgrade --no-cache && apk add --no-cache git
+RUN apk upgrade --no-cache && apk add --no-cache git patch
 
 COPY upstream/ ./
 COPY patches/ /tmp/patches/
 COPY stall_tolerant_reader.go ./
-RUN git apply --verbose /tmp/patches/tune.patch \
+RUN patch -p1 --verbose < /tmp/patches/tune.patch \
     && go build -o /opt/ah4c
 
 # Copy upstream runtime assets from the submodule
