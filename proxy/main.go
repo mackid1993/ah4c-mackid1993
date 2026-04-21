@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -41,21 +40,15 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 
+	// Kernel default TCP buffers — with the settle delay in place there is
+	// no pre-read accumulation to worry about, so a generous socket buffer
+	// just gives more throughput headroom if ah4c's drain rate blips
+	// (GC pauses, scheduler stalls, etc.), preventing the rare slow-motion
+	// playback moment that tight buffers were causing.
 	srv := &http.Server{
 		Addr:              listenAddr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
-		// Shrink the kernel TCP send buffer on each accepted connection
-		// (proxy -> ah4c loopback) to keep wall-clock lag tight.
-		ConnState: func(c net.Conn, state http.ConnState) {
-			if state != http.StateNew {
-				return
-			}
-			if tc, ok := c.(*net.TCPConn); ok {
-				_ = tc.SetWriteBuffer(16 * 1024)
-				_ = tc.SetReadBuffer(16 * 1024)
-			}
-		},
 	}
 	log.Printf("stall_proxy listening on %s (tune settle delay %s)", listenAddr, settleDelay())
 	if err := srv.ListenAndServe(); err != nil {
