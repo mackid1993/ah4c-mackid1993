@@ -30,11 +30,13 @@ import (
 )
 
 const (
-	listenAddr          = "127.0.0.1:47811"
-	defaultMaxTuneWait  = 30 * time.Second
-	bmituneScanWindow   = 3 * time.Second // how long to look for bmitune to appear before giving up
-	bmituneFallbackWait = 500 * time.Millisecond
-	maxWaitEnvVar       = "STALL_PROXY_TUNE_DELAY_MS" // total time budget for the bmitune wait
+	listenAddr            = "127.0.0.1:47811"
+	defaultMaxTuneWait    = 30 * time.Second
+	bmituneScanWindow     = 3 * time.Second // how long to look for bmitune to appear before giving up
+	bmituneFallbackWait   = 500 * time.Millisecond
+	defaultPostBmituneSlp = 1 * time.Second
+	maxWaitEnvVar         = "STALL_PROXY_TUNE_DELAY_MS"       // total time budget for the bmitune wait
+	postBmituneEnvVar     = "STALL_PROXY_POST_BMITUNE_MS"     // grace sleep after bmitune.sh exits
 )
 
 func main() {
@@ -49,7 +51,8 @@ func main() {
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	log.Printf("stall_proxy listening on %s (max bmitune wait %s)", listenAddr, maxTuneWait())
+	log.Printf("stall_proxy listening on %s (max bmitune wait %s, post-bmitune sleep %s)",
+		listenAddr, maxTuneWait(), postBmituneSleep())
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
@@ -62,6 +65,15 @@ func maxTuneWait() time.Duration {
 		}
 	}
 	return defaultMaxTuneWait
+}
+
+func postBmituneSleep() time.Duration {
+	if v := os.Getenv(postBmituneEnvVar); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil && ms >= 0 {
+			return time.Duration(ms) * time.Millisecond
+		}
+	}
+	return defaultPostBmituneSlp
 }
 
 func handleTuner(w http.ResponseWriter, r *http.Request) {
@@ -92,8 +104,20 @@ func handleTuner(w http.ResponseWriter, r *http.Request) {
 	// 2. Wait for bmitune.sh (this tuner's channel-change script) to finish.
 	waitForBmituneExit(ctx, n, label, maxTuneWait())
 
+	// 2b. Post-bmitune grace sleep. Many bmitune scripts dispatch an
+	// asynchronous command (e.g. ADB on an Osprey) and exit immediately;
+	// the actual encoder channel switch can complete several seconds
+	// after bmitune.sh returns. Sleeping briefly before connecting keeps
+	// DVR from receiving old-channel bytes that then EOF and force a
+	// PAT/PMT re-lock. Tune with STALL_PROXY_POST_BMITUNE_MS.
+	postSleep := postBmituneSleep()
+	if postSleep > 0 {
+		log.Printf("[%s] post-bmitune sleep %s before encoder connect", label, postSleep)
+		sleepWithCtx(ctx, postSleep)
+	}
+
 	// 3. Connect and stream. Encoder is now on the target channel.
-	log.Printf("[%s] bmitune settled; connecting to encoder %s", label, upstream)
+	log.Printf("[%s] connecting to encoder %s", label, upstream)
 	reader := newStallTolerantReader(nil, func() (io.ReadCloser, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstream, nil)
 		if err != nil {

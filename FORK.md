@@ -19,7 +19,8 @@ ah4c's `tune()` calls `http.Get(ENCODER<N>_URL)` as usual; the proxy is transpar
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `STALL_PROXY_TUNE_DELAY_MS` | `30000` | Maximum milliseconds the proxy will wait for `bmitune.sh` (your channel-switch script) to exit before connecting to the encoder. The proxy watches `/proc` for a `bmitune.sh` process matching this tuner's `TUNER<N>_IP` and connects the moment that process exits — no wasted time on warm tunes, no reconnect+relock drama on slow ones. You rarely need to touch this; 30s is a ceiling, not a fixed delay. |
+| `STALL_PROXY_TUNE_DELAY_MS` | `30000` | Maximum milliseconds the proxy will wait for `bmitune.sh` (your channel-switch script) to exit before connecting to the encoder. The proxy watches `/proc` for a `bmitune.sh` process matching this tuner's `TUNER<N>_IP` and connects the moment that process exits. 30s is a ceiling, not a fixed delay; rarely needs tuning. |
+| `STALL_PROXY_POST_BMITUNE_MS` | `1000` | Milliseconds to sleep *after* `bmitune.sh` exits, before opening the encoder connection. Some `bmitune.sh` scripts dispatch an async command (e.g. ADB on an Osprey) and exit in ~100ms while the real channel switch takes several seconds more. This grace period lets the encoder finish switching so DVR's first bytes are clean new-channel content. Bump to e.g. `4000` for Osprey + ADB; `0` disables the sleep for hardware where `bmitune.sh` blocks until the switch completes (e.g. LinkPi HTTP). |
 
 All other upstream ah4c env vars (`NUMBER_TUNERS`, `ENCODER<N>_URL`, `TUNER<N>_IP`, `CMD<N>`, `TEECMD<N>`, `STREAMER_APP`, etc.) work exactly as documented in the upstream README.
 
