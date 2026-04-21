@@ -1,9 +1,9 @@
-name: Test patch
+name: Test build
 
-# Runs on every push / PR and via manual dispatch. Verifies:
-#   1. patches/tune.patch cleanly applies to the pinned upstream submodule
-#   2. the full Docker image builds (Go compiles with the patch + reader)
-# If upstream drifts and the patch no longer applies, this workflow goes red.
+# Runs on every push / PR and on manual dispatch. Builds the image end-to-end
+# to verify the proxy + ah4c + entrypoint layout still compiles and links.
+# There is no patch applied to upstream source, so upstream drift cannot
+# break this — but if we introduce a regression locally this catches it.
 
 on:
   push:
@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  verify:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (with submodule)
@@ -20,14 +20,10 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Dry-run patch against submodule
-        working-directory: upstream
-        run: git apply --check --verbose ../patches/tune.patch
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build image (patch must apply + Go must compile)
+      - name: Build image
         uses: docker/build-push-action@v6
         with:
           context: .

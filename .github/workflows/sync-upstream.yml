@@ -1,13 +1,13 @@
 name: Sync submodule from sullrich/ah4c
 
-# Runs daily on a schedule and can also be triggered manually. Advances
-# the upstream/ submodule pointer to the latest sullrich/ah4c main, verifies
-# patches/tune.patch still applies, and pushes. If the patch no longer
-# applies, the workflow fails and GitHub emails you — time to update the
-# patch. On success, run "Build and publish image" manually.
+# Runs daily and on manual dispatch. Advances upstream/ submodule pointer
+# to the latest sullrich/ah4c main and pushes. Upstream source is not
+# patched — we just need it to compile, which the build-verify step confirms.
+# On successful sync, opens a GitHub Issue so the user gets notified and
+# knows to run the Build and publish workflow manually.
 on:
   schedule:
-    - cron: '0 13 * * *'  # 13:00 UTC daily
+    - cron: '0 13 * * *'  # 13:00 UTC daily (9 AM EDT / 8 AM EST)
   workflow_dispatch:
     inputs:
       upstream_ref:
@@ -53,10 +53,20 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Verify patch still applies
+      - name: Set up Docker Buildx
         if: steps.diff.outputs.changed == 'true'
-        working-directory: upstream
-        run: git apply --check --verbose ../patches/tune.patch
+        uses: docker/setup-buildx-action@v3
+
+      - name: Verify build against new upstream
+        if: steps.diff.outputs.changed == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Commit and push new submodule pointer
         if: steps.diff.outputs.changed == 'true'
@@ -70,9 +80,6 @@ jobs:
           echo "short_sha=$new_sha" >> "$GITHUB_OUTPUT"
           echo "full_sha=$full_sha" >> "$GITHUB_OUTPUT"
 
-      # Opening an issue triggers an email via GitHub's default notification
-      # settings — that's how we get "notify on success" without changing
-      # account-level notification preferences.
       - name: Open sync-notification issue
         if: steps.diff.outputs.changed == 'true'
         env:
@@ -80,14 +87,12 @@ jobs:
         run: |
           title="Upstream synced to sullrich/ah4c@${{ steps.push.outputs.short_sha }} — run Build and Publish"
           body=$(cat <<EOF
-          The daily sync-upstream workflow advanced the submodule and the patch still applies cleanly.
+          The daily sync-upstream workflow advanced the submodule and the image still builds.
 
           - New pin: [\`${{ steps.push.outputs.short_sha }}\`](https://github.com/sullrich/ah4c/commit/${{ steps.push.outputs.full_sha }})
           - Upstream compare: https://github.com/sullrich/ah4c/compare/${{ steps.push.outputs.full_sha }}
 
           Next step: run the **Build and publish image** workflow manually to ship a new container.
-
-          Close this issue once you've run the build.
           EOF
           )
           gh issue create --title "$title" --body "$body"

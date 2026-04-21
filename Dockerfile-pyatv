@@ -1,20 +1,24 @@
 #docker buildx build --platform linux/amd64 -f Dockerfile-pyatv -t ghcr.io/mackid1993/ah4c-mackid1993:pyatv . --push
 
-# See Dockerfile for the patch-overlay model (submodule + patches/).
+# See Dockerfile for the design. ah4c is built from upstream unmodified.
+# stall_proxy runs on 127.0.0.1 inside the container; entrypoint.sh rewrites
+# ENCODER<N>_URL env vars to route ah4c through the proxy.
 
 FROM golang:alpine3.21 AS builder2
 
 RUN mkdir -p /go/src/github.com/sullrich
 WORKDIR /go/src/github.com/sullrich
 
-RUN apk upgrade --no-cache && apk add --no-cache git patch
+RUN apk upgrade --no-cache && apk add --no-cache git
 
+# Build ah4c unmodified
 COPY upstream/ ./
-COPY patches/ /tmp/patches/
-COPY stall_tolerant_reader.go ./
-RUN patch -p1 -F 0 --verbose < /tmp/patches/tune.patch \
-    && grep -q 'WrapEncoderBody(resp.Body' main.go \
-    && go build -o /opt/ah4c
+RUN go build -o /opt/ah4c
+
+# Build stall_proxy
+WORKDIR /go/src/stall_proxy
+COPY proxy/ ./
+RUN go build -o /opt/stall_proxy .
 
 # Copy upstream runtime assets from the submodule
 COPY upstream/docker-start-pyatv.sh /opt/
@@ -22,6 +26,9 @@ COPY upstream/scripts/ /tmp/scripts/
 COPY upstream/m3u/ /tmp/m3u/
 COPY upstream/html/ /opt/html/
 COPY upstream/static/ /opt/static/
+
+# Our entrypoint wrapper
+COPY entrypoint.sh /opt/entrypoint.sh
 
 FROM ghcr.io/postlund/pyatv:0.14.5 AS runner
 LABEL maintainer="The Slayer <slayer@technologydragonslayer.com>"
@@ -35,7 +42,14 @@ RUN apk upgrade --no-cache \
 COPY --from=builder2 /opt /opt
 COPY --from=builder2 /tmp /tmp
 
+RUN chmod +x /opt/entrypoint.sh /opt/stall_proxy /opt/docker-start-pyatv.sh
+
 EXPOSE 7654
 EXPOSE 8000
 
-CMD ["./docker-start-pyatv.sh"]
+# entrypoint.sh execs docker-start.sh at the end; for the pyatv variant we
+# point docker-start.sh at docker-start-pyatv.sh via symlink so the same
+# entrypoint script works unchanged.
+RUN ln -sf /opt/docker-start-pyatv.sh /opt/docker-start.sh
+
+CMD ["/opt/entrypoint.sh"]

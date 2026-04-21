@@ -1,39 +1,17 @@
-// Fallback patch for mackid1993's PR #9 on sullrich/ah4c.
-// Injected into the upstream source at Docker build time via the Dockerfile;
-// no edits to main.go live in this fork. See README / Dockerfile for details.
-
 package main
 
 import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
+	"log"
 	"sync"
 	"time"
 )
 
-// WrapEncoderBody wraps the encoder HTTP response body with a stall-tolerant
-// reader. This is the single integration point: the Dockerfile seds
-// `ReadCloser: resp.Body,` in main.go's tune() to call this.
-func WrapEncoderBody(body io.ReadCloser, encoderURL, tunerip string) io.ReadCloser {
-	label := fmt.Sprintf("tuner=%s", tunerip)
-	return newStallTolerantReader(body, func() (io.ReadCloser, error) {
-		r, e := http.Get(encoderURL)
-		if e != nil {
-			return nil, e
-		}
-		if r.StatusCode != 200 {
-			r.Body.Close()
-			return nil, fmt.Errorf("status %s", r.Status)
-		}
-		return r.Body, nil
-	}, label)
-}
-
-// nullTSPacket is a single 188-byte MPEG-TS NULL packet (PID 0x1FFF). TS
-// demuxers including Channels DVR drop these on demux, so they're safe to
-// inject as a keepalive when the upstream encoder briefly stops producing.
+// nullTSPacket — a 188-byte MPEG-TS NULL packet (PID 0x1FFF). TS demuxers
+// drop these on demux, so they're safe to emit as keepalive bytes when the
+// upstream encoder is cold or stalled.
 var nullTSPacket = func() [188]byte {
 	var p [188]byte
 	p[0] = 0x47
@@ -46,10 +24,20 @@ var nullTSPacket = func() [188]byte {
 	return p
 }()
 
-// stallTolerantReader wraps an HTTP response body so that downstream consumers
-// (Channels DVR) never observe a zero-byte gap when the upstream encoder
-// stalls (e.g. while bmitune.sh triggers a channel change) or when the
-// underlying TCP connection dies and needs to be re-established.
+const (
+	stallReadGap         = 500 * time.Millisecond
+	srcStallReconnect    = 5 * time.Second
+	srcReconnectBackoff  = 2 * time.Second
+	maxUnhealthyDuration = 5 * time.Minute // cold LinkPi reboot can take a while
+	chunkSize            = 32 * 1024
+	queueDepth           = 64
+)
+
+// stallTolerantReader wraps an HTTP response body so downstream consumers
+// (Channels DVR) never observe a zero-byte gap when the upstream encoder is
+// cold, stalled, or cycling. Warm streams pass through untouched: bytes go
+// producer->queue->Read() with sub-millisecond overhead. Only when the queue
+// has been empty for stallReadGap (500ms) do NULL TS packets fill in.
 type stallTolerantReader struct {
 	chunks      chan []byte
 	closed      chan struct{}
@@ -60,15 +48,9 @@ type stallTolerantReader struct {
 	label       string
 }
 
-const (
-	stallReadGap         = 500 * time.Millisecond
-	srcStallReconnect    = 5 * time.Second
-	srcReconnectBackoff  = 2 * time.Second
-	maxUnhealthyDuration = 15 * time.Second
-	chunkSize            = 32 * 1024
-	queueDepth           = 64
-)
-
+// newStallTolerantReader accepts a nil initial body — useful when the
+// upstream encoder may still be booting. The producer will call reconnectFn
+// to obtain the first connection.
 func newStallTolerantReader(body io.ReadCloser, reconnectFn func() (io.ReadCloser, error), label string) *stallTolerantReader {
 	s := &stallTolerantReader{
 		chunks:      make(chan []byte, queueDepth),
@@ -85,7 +67,7 @@ func (s *stallTolerantReader) producer() {
 	chunk := make([]byte, chunkSize)
 	lastRealBytes := time.Now()
 	giveUp := func(reason string) {
-		logger("[%s] %s; closing reader so DVR sees EOF", s.label, reason)
+		log.Printf("[%s] %s; closing reader so DVR sees EOF", s.label, reason)
 		s.closeOnce.Do(func() { close(s.closed) })
 	}
 	for {
@@ -101,9 +83,16 @@ func (s *stallTolerantReader) producer() {
 		s.bodyMu.Lock()
 		body := s.body
 		s.bodyMu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), srcStallReconnect)
-		n, err := readWithDeadline(ctx, body, chunk)
-		cancel()
+
+		var n int
+		var err error
+		if body == nil {
+			err = fmt.Errorf("no upstream body yet")
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), srcStallReconnect)
+			n, err = readWithDeadline(ctx, body, chunk)
+			cancel()
+		}
 		if n > 0 {
 			lastRealBytes = time.Now()
 			data := make([]byte, n)
@@ -117,10 +106,12 @@ func (s *stallTolerantReader) producer() {
 				continue
 			}
 		}
-		if err != nil {
-			logger("[%s] source idle/error (%v); reconnecting", s.label, err)
+		if err != nil && body != nil {
+			log.Printf("[%s] source idle/error (%v); reconnecting", s.label, err)
 		}
-		body.Close()
+		if body != nil {
+			body.Close()
+		}
 		if s.reconnectFn == nil {
 			s.closeOnce.Do(func() { close(s.closed) })
 			return
@@ -141,14 +132,16 @@ func (s *stallTolerantReader) producer() {
 				newBody = nb
 				break
 			}
-			logger("[%s] reconnect failed: %v", s.label, rerr)
+			// Verbose only once every few attempts to avoid log spam during
+			// a long cold-boot.
+			log.Printf("[%s] reconnect failed: %v", s.label, rerr)
 			select {
 			case <-time.After(srcReconnectBackoff):
 			case <-s.closed:
 				return
 			}
 		}
-		logger("[%s] reconnected", s.label)
+		log.Printf("[%s] connected", s.label)
 		s.bodyMu.Lock()
 		s.body = newBody
 		s.bodyMu.Unlock()
