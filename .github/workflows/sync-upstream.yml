@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   sync:
@@ -59,8 +60,34 @@ jobs:
 
       - name: Commit and push new submodule pointer
         if: steps.diff.outputs.changed == 'true'
+        id: push
         run: |
           new_sha=$(git -C upstream rev-parse --short HEAD)
+          full_sha=$(git -C upstream rev-parse HEAD)
           git add upstream
           git commit -m "Sync upstream submodule to sullrich/ah4c@${new_sha}"
           git push origin HEAD
+          echo "short_sha=$new_sha" >> "$GITHUB_OUTPUT"
+          echo "full_sha=$full_sha" >> "$GITHUB_OUTPUT"
+
+      # Opening an issue triggers an email via GitHub's default notification
+      # settings — that's how we get "notify on success" without changing
+      # account-level notification preferences.
+      - name: Open sync-notification issue
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          title="Upstream synced to sullrich/ah4c@${{ steps.push.outputs.short_sha }} — run Build and Publish"
+          body=$(cat <<EOF
+          The daily sync-upstream workflow advanced the submodule and the patch still applies cleanly.
+
+          - New pin: [\`${{ steps.push.outputs.short_sha }}\`](https://github.com/sullrich/ah4c/commit/${{ steps.push.outputs.full_sha }})
+          - Upstream compare: https://github.com/sullrich/ah4c/compare/${{ steps.push.outputs.full_sha }}
+
+          Next step: run the **Build and publish image** workflow manually to ship a new container.
+
+          Close this issue once you've run the build.
+          EOF
+          )
+          gh issue create --title "$title" --body "$body"
