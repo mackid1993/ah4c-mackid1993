@@ -90,7 +90,27 @@ func handleTuner(w http.ResponseWriter, r *http.Request) {
 		f.Flush()
 	}
 
-	if _, err := io.Copy(w, reader); err != nil {
-		log.Printf("[%s] stream ended: %v", label, err)
+	// Custom copy loop with flush-after-write so bytes leave the proxy the
+	// instant they arrive from the producer. io.Copy by itself would sit on
+	// Go's default HTTP response bufio (~4KB), adding avoidable latency.
+	flusher, _ := w.(http.Flusher)
+	buf := make([]byte, 32*1024)
+	for {
+		n, rerr := reader.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				log.Printf("[%s] client write failed: %v", label, werr)
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if rerr != nil {
+			if rerr != io.EOF {
+				log.Printf("[%s] stream ended: %v", label, rerr)
+			}
+			return
+		}
 	}
 }
