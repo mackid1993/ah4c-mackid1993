@@ -54,6 +54,21 @@ docker exec ah4c cat /proc/1/environ | tr '\0' '\n' | grep -E "ENCODER|STALL_PRO
 - **Sync submodule from sullrich/ah4c** — daily schedule (13:00 UTC ≈ 9 AM Eastern) plus manual dispatch. Advances `upstream/` submodule, rebuilds to verify, opens a GitHub issue on success so you know to run the publish workflow.
 - **Build and publish image** — manual dispatch. Builds `linux/amd64` and pushes to `ghcr.io/mackid1993/ah4c-mackid1993:latest` (optional extra tag input).
 
+## Process supervision
+
+`entrypoint.sh` supervises both `stall_proxy` and upstream's `docker-start.sh`. If either dies, the whole container exits non-zero so Docker's restart policy brings it back in a clean state. Set `restart: unless-stopped` (or equivalent) on your container so this recovery is automatic:
+
+```yaml
+# docker-compose.yml
+services:
+  ah4c:
+    image: ghcr.io/mackid1993/ah4c-mackid1993:latest
+    restart: unless-stopped
+    # ...
+```
+
+SIGTERM / SIGINT from Docker are forwarded to both children for clean shutdown.
+
 ## Tuning tips
 
 - If DVR shows buffering / behind-timeline on first tune: `STALL_PROXY_TUNE_DELAY_MS` may be too short for your hardware's script timing. Bump in increments of 500ms.
