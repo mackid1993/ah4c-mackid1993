@@ -26,12 +26,20 @@ var nullTSPacket = func() [188]byte {
 }()
 
 const (
-	stallReadGap          = 500 * time.Millisecond
-	firstChunkGap         = 15 * time.Second // how long Read() waits for the first real chunk before giving up as EOF
-	srcStallReconnect     = 5 * time.Second
-	srcReconnectBackoff   = 2 * time.Second
-	maxUnhealthyDuration  = 15 * time.Second
-	chunkSize             = 32 * 1024
+	stallReadGap        = 500 * time.Millisecond
+	firstChunkGap       = 15 * time.Second // how long Read() waits for the first real chunk before giving up as EOF
+	srcStallReconnect   = 5 * time.Second
+	srcReconnectBackoff = 2 * time.Second
+	// Two unhealthy-duration budgets:
+	//   - preFirstChunk: how long we'll try before ah4c gives up on this
+	//     tuner and falls through. Short; matches PR #9 tune-failover policy.
+	//   - postFirstChunk: how long we tolerate a mid-stream glitch on an
+	//     ALREADY-PLAYING recording before closing the stream. Generous,
+	//     because an encoder hiccup or source-app re-launch in the middle
+	//     of a 2-hour recording should not end the recording.
+	preFirstChunkUnhealthy  = 15 * time.Second
+	postFirstChunkUnhealthy = 3 * time.Minute
+	chunkSize               = 32 * 1024
 	// queueDepth = 64: matches PR #9 exactly. At ~5 Mbps this is ~3s of
 	// buffered bytes — big enough to silently absorb a typical bmitune
 	// channel-switch stall without the 500ms NULL timer firing, which is
@@ -79,6 +87,16 @@ func newStallTolerantReader(body io.ReadCloser, reconnectFn func() (io.ReadClose
 	return s
 }
 
+// unhealthyLimit returns the tolerated no-bytes duration — short before
+// the first real chunk (so a dead tuner fails over quickly), generous
+// after (so a mid-stream glitch on a long recording doesn't end it).
+func (s *stallTolerantReader) unhealthyLimit() time.Duration {
+	if s.hasFirstChunk.Load() {
+		return postFirstChunkUnhealthy
+	}
+	return preFirstChunkUnhealthy
+}
+
 func (s *stallTolerantReader) producer() {
 	chunk := make([]byte, chunkSize)
 	lastRealBytes := time.Now()
@@ -92,8 +110,8 @@ func (s *stallTolerantReader) producer() {
 			return
 		default:
 		}
-		if time.Since(lastRealBytes) > maxUnhealthyDuration {
-			giveUp(fmt.Sprintf("no source bytes for %v", maxUnhealthyDuration))
+		if time.Since(lastRealBytes) > s.unhealthyLimit() {
+			giveUp(fmt.Sprintf("no source bytes for %v", s.unhealthyLimit()))
 			return
 		}
 		s.bodyMu.Lock()
@@ -144,8 +162,8 @@ func (s *stallTolerantReader) producer() {
 				return
 			default:
 			}
-			if time.Since(lastRealBytes) > maxUnhealthyDuration {
-				giveUp(fmt.Sprintf("no source bytes for %v during reconnect", maxUnhealthyDuration))
+			if time.Since(lastRealBytes) > s.unhealthyLimit() {
+				giveUp(fmt.Sprintf("no source bytes for %v during reconnect", s.unhealthyLimit()))
 				return
 			}
 			nb, rerr := s.reconnectFn()

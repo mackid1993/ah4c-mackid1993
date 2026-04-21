@@ -35,9 +35,20 @@ const (
 	bmituneScanWindow     = 3 * time.Second // how long to look for bmitune to appear before giving up
 	bmituneFallbackWait   = 500 * time.Millisecond
 	defaultPostBmituneSlp = 1 * time.Second
-	maxWaitEnvVar         = "STALL_PROXY_TUNE_DELAY_MS"       // total time budget for the bmitune wait
-	postBmituneEnvVar     = "STALL_PROXY_POST_BMITUNE_MS"     // grace sleep after bmitune.sh exits
+	maxWaitEnvVar         = "STALL_PROXY_TUNE_DELAY_MS"   // total time budget for the bmitune wait
+	postBmituneEnvVar     = "STALL_PROXY_POST_BMITUNE_MS" // grace sleep after bmitune.sh exits
 )
+
+// encoderClient is used for every reconnect to the real encoder. It has a
+// ResponseHeaderTimeout so a TCP-accepted-but-header-hung encoder can't
+// block the producer indefinitely — http.DefaultClient has no such bound,
+// and the stallTolerantReader's unhealthy-duration check doesn't tick
+// during the reconnect's Do() call, only during body reads.
+var encoderClient = &http.Client{
+	Transport: &http.Transport{
+		ResponseHeaderTimeout: 10 * time.Second,
+	},
+}
 
 func main() {
 	mux := http.NewServeMux()
@@ -123,7 +134,7 @@ func handleTuner(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := encoderClient.Do(req)
 		if err != nil {
 			return nil, err
 		}
