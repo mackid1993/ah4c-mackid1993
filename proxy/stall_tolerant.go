@@ -160,7 +160,7 @@ func (s *stallTolerantReader) producer() {
 		default:
 		}
 		if err != nil && body != nil {
-			log.Printf("[%s] lost encoder stream (%v); reconnecting", s.label, err)
+			log.Printf("[%s] encoder closed stream (%v); reconnecting", s.label, err)
 		}
 		if body != nil {
 			body.Close()
