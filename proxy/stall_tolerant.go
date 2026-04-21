@@ -32,12 +32,14 @@ const (
 	srcReconnectBackoff   = 2 * time.Second
 	maxUnhealthyDuration  = 15 * time.Second
 	chunkSize             = 32 * 1024
-	// queueDepth = 0: unbuffered channel. Producer's push BLOCKS until
-	// Read() pulls. There is never more than one chunk in flight between
-	// the encoder body and DVR, so DVR tracks live with the minimum lag
-	// the IPC pipeline physically allows (1 chunk + tuned TCP buffers).
-	// Use this when even ~80ms of stable lag is visible on the DVR UI.
-	queueDepth = 0
+	// queueDepth = 64: matches PR #9 exactly. At ~5 Mbps this is ~3s of
+	// buffered bytes — big enough to silently absorb a typical bmitune
+	// channel-switch stall without the 500ms NULL timer firing, which is
+	// what keeps DVR's audio PID lock intact. In steady state the queue
+	// only fills to prebmitune-duration-worth of chunks (LinkPi is fast,
+	// so real in-flight lag is bounded to a few hundred ms, not the full
+	// 3s theoretical ceiling).
+	queueDepth = 64
 	reconnectLogThrottle  = 10 * time.Second
 )
 
