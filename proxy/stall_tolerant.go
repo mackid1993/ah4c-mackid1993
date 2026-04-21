@@ -32,13 +32,12 @@ const (
 	srcReconnectBackoff   = 2 * time.Second
 	maxUnhealthyDuration  = 15 * time.Second
 	chunkSize             = 32 * 1024
-	// queueDepth kept tiny: the proxy's producer starts reading from the
-	// encoder as soon as it connects, which is typically before ah4c drains
-	// its HTTP response body (ah4c is still running prebmitune). A large
-	// queue would accumulate seconds of pre-read content here, leaving DVR
-	// permanently behind live TV. 2 * 32KB ≈ 100ms of buffer is enough to
-	// smooth normal jitter without turning into an invisible time shift.
-	queueDepth = 2
+	// queueDepth = 1: minimum viable buffer. Producer pushes one chunk then
+	// blocks until Read() pulls, keeping DVR as close to the live encoder
+	// stream as the IPC pipeline allows. Any larger value lets the producer
+	// read ahead during ah4c's prebmitune window and permanently time-shifts
+	// DVR behind live TV.
+	queueDepth = 1
 	reconnectLogThrottle  = 10 * time.Second
 )
 

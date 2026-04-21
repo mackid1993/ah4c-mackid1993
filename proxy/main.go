@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -37,6 +38,21 @@ func main() {
 		Addr:              listenAddr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		// Shrink the kernel TCP send buffer on each accepted connection
+		// (proxy -> ah4c loopback). Linux default is ~87KB, which holds
+		// ~140ms of a 5 Mbps stream — enough to keep DVR visibly behind
+		// live TV regardless of how tight our user-space buffering is.
+		// 16KB caps that to ~25ms; loopback has zero RTT so throughput
+		// is not impacted.
+		ConnState: func(c net.Conn, state http.ConnState) {
+			if state != http.StateNew {
+				return
+			}
+			if tc, ok := c.(*net.TCPConn); ok {
+				_ = tc.SetWriteBuffer(16 * 1024)
+				_ = tc.SetReadBuffer(16 * 1024)
+			}
+		},
 	}
 	log.Printf("stall_proxy listening on %s", listenAddr)
 	if err := srv.ListenAndServe(); err != nil {
