@@ -1,7 +1,7 @@
 diff --git a/main.go b/main.go
 --- a/main.go
 +++ b/main.go
-@@ -384,20 +384,21 @@
+@@ -384,25 +384,26 @@
  			}
  			// Network encoder
  			logger("Attempting network tune for device %s %s %v %v", t.url, t.tunerip, channel, idx)
