@@ -32,12 +32,12 @@ const (
 	srcReconnectBackoff   = 2 * time.Second
 	maxUnhealthyDuration  = 15 * time.Second
 	chunkSize             = 32 * 1024
-	// queueDepth = 1: minimum viable buffer. Producer pushes one chunk then
-	// blocks until Read() pulls, keeping DVR as close to the live encoder
-	// stream as the IPC pipeline allows. Any larger value lets the producer
-	// read ahead during ah4c's prebmitune window and permanently time-shifts
-	// DVR behind live TV.
-	queueDepth = 1
+	// queueDepth = 0: unbuffered channel. Producer's push BLOCKS until
+	// Read() pulls. There is never more than one chunk in flight between
+	// the encoder body and DVR, so DVR tracks live with the minimum lag
+	// the IPC pipeline physically allows (1 chunk + tuned TCP buffers).
+	// Use this when even ~80ms of stable lag is visible on the DVR UI.
+	queueDepth = 0
 	reconnectLogThrottle  = 10 * time.Second
 )
 
