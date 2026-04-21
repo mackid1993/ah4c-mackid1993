@@ -1,8 +1,13 @@
 name: Sync submodule from sullrich/ah4c
 
-# Manual only. Bumps the upstream/ submodule pointer to the latest
-# sullrich/ah4c main, verifies the patch still applies + builds, then pushes.
+# Runs daily on a schedule and can also be triggered manually. Advances
+# the upstream/ submodule pointer to the latest sullrich/ah4c main, verifies
+# patches/tune.patch still applies, and pushes. If the patch no longer
+# applies, the workflow fails and GitHub emails you — time to update the
+# patch. On success, run "Build and publish image" manually.
 on:
+  schedule:
+    - cron: '0 13 * * *'  # 13:00 UTC daily
   workflow_dispatch:
     inputs:
       upstream_ref:
@@ -29,10 +34,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Advance submodule to upstream ${{ inputs.upstream_ref }}
+      - name: Advance submodule to upstream
         working-directory: upstream
         run: |
-          git fetch origin "${{ inputs.upstream_ref }}"
+          ref="${{ inputs.upstream_ref || 'main' }}"
+          git fetch origin "$ref"
           git checkout FETCH_HEAD
           echo "New upstream SHA: $(git rev-parse HEAD)"
 
@@ -40,31 +46,16 @@ jobs:
         id: diff
         run: |
           if git diff --quiet upstream; then
-            echo "No submodule change. Exiting."
+            echo "No upstream change. Nothing to do."
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Dry-run patch against new upstream
+      - name: Verify patch still applies
         if: steps.diff.outputs.changed == 'true'
         working-directory: upstream
         run: git apply --check --verbose ../patches/tune.patch
-
-      - name: Set up Docker Buildx
-        if: steps.diff.outputs.changed == 'true'
-        uses: docker/setup-buildx-action@v3
-
-      - name: Verify build
-        if: steps.diff.outputs.changed == 'true'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          platforms: linux/amd64
-          push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Commit and push new submodule pointer
         if: steps.diff.outputs.changed == 'true'
