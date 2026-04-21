@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -142,9 +143,17 @@ func (s *stallTolerantReader) producer() {
 				continue
 			}
 		}
-		// n == 0 OR err != nil after partial read. If s.closed is already
-		// set we're shutting down; don't log a misleading "reconnecting"
-		// message since we won't actually reconnect.
+		// n == 0 OR err != nil after partial read. Treat context.Canceled
+		// as a shutdown signal from the client (DVR/ah4c disconnected):
+		// close the reader and return without logging a misleading
+		// "reconnecting" message. Same for an already-set s.closed.
+		if errors.Is(err, context.Canceled) {
+			if body != nil {
+				body.Close()
+			}
+			s.closeOnce.Do(func() { close(s.closed) })
+			return
+		}
 		select {
 		case <-s.closed:
 			return
