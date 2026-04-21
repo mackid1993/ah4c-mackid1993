@@ -100,6 +100,7 @@ func (s *stallTolerantReader) unhealthyLimit() time.Duration {
 func (s *stallTolerantReader) producer() {
 	chunk := make([]byte, chunkSize)
 	lastRealBytes := time.Now()
+	haveConnectedOnce := false
 	giveUp := func(reason string) {
 		log.Printf("[%s] %s; closing reader so DVR sees EOF", s.label, reason)
 		s.closeOnce.Do(func() { close(s.closed) })
@@ -141,9 +142,16 @@ func (s *stallTolerantReader) producer() {
 				continue
 			}
 		}
-		// n == 0 OR err != nil after partial read.
+		// n == 0 OR err != nil after partial read. If s.closed is already
+		// set we're shutting down; don't log a misleading "reconnecting"
+		// message since we won't actually reconnect.
+		select {
+		case <-s.closed:
+			return
+		default:
+		}
 		if err != nil && body != nil {
-			log.Printf("[%s] source idle/error (%v); reconnecting", s.label, err)
+			log.Printf("[%s] lost encoder stream (%v); reconnecting", s.label, err)
 		}
 		if body != nil {
 			body.Close()
@@ -182,7 +190,12 @@ func (s *stallTolerantReader) producer() {
 				return
 			}
 		}
-		log.Printf("[%s] reconnected", s.label)
+		if haveConnectedOnce {
+			log.Printf("[%s] reconnected to encoder", s.label)
+		} else {
+			log.Printf("[%s] connected to encoder", s.label)
+			haveConnectedOnce = true
+		}
 		s.bodyMu.Lock()
 		s.body = newBody
 		s.bodyMu.Unlock()
