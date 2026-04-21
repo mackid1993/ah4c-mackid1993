@@ -31,7 +31,7 @@ WORKDIR /go/src/github.com/sullrich
 COPY upstream/ ./
 COPY patches/ /tmp/patches/
 COPY stall_tolerant_reader.go ./
-RUN patch -p1 --verbose < /tmp/patches/tune.patch \
+RUN patch -p1 --no-fuzz --verbose < /tmp/patches/tune.patch \
     && grep -q 'WrapEncoderBody(resp.Body' main.go \
     && go build -o /opt/ah4c
 
