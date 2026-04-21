@@ -81,7 +81,7 @@ jobs:
           echo "full_sha=$full_sha" >> "$GITHUB_OUTPUT"
 
       - name: Open sync-notification issue
-        if: steps.diff.outputs.changed == 'true'
+        if: success() && steps.diff.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -96,3 +96,18 @@ jobs:
           EOF
           )
           gh issue create --title "$title" --body "$body"
+
+      # Notify on failure too. Without this, a broken sync (upstream drift
+      # breaking the docker build, a push conflict, etc.) would only raise
+      # GitHub's default failure email for scheduled runs — easy to miss,
+      # and the whole point of this workflow is to surface those exact
+      # events promptly.
+      - name: Open issue on sync failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          gh issue create \
+            --title "Upstream sync FAILED — run ${GITHUB_RUN_ID}" \
+            --body "The scheduled sync workflow failed. This usually means upstream drift broke the docker build, the patch of bmitune-detection logic no longer applies, or a push conflict occurred. Run log: ${run_url}"

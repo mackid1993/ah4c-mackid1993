@@ -235,8 +235,15 @@ func findBmituneProcess(needleScript, needleIP string) int {
 			continue
 		}
 		cmd := string(data)
-		if strings.Contains(cmd, needleScript) && strings.Contains(cmd, needleIP) {
-			return pid
+		if !strings.Contains(cmd, needleScript) {
+			continue
+		}
+		// /proc/<pid>/cmdline is NUL-separated. Match the tuner IP as a
+		// whole argument so e.g. "10.0.0.1" can't false-match "10.0.0.10".
+		for _, arg := range strings.Split(cmd, "\x00") {
+			if arg == needleIP {
+				return pid
+			}
 		}
 	}
 	return 0

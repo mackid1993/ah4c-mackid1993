@@ -227,12 +227,17 @@ func readWithDeadline(ctx context.Context, r io.Reader, buf []byte) (int, error)
 		err error
 	}
 	ch := make(chan result, 1)
+	// Goroutine uses its own buffer so if the deadline fires before the
+	// Read returns, the leaked goroutine can't race on the caller's
+	// buffer (which the producer reuses across iterations).
+	innerBuf := make([]byte, len(buf))
 	go func() {
-		n, err := r.Read(buf)
+		n, err := r.Read(innerBuf)
 		ch <- result{n, err}
 	}()
 	select {
 	case res := <-ch:
+		copy(buf, innerBuf[:res.n])
 		return res.n, res.err
 	case <-ctx.Done():
 		return 0, ctx.Err()
