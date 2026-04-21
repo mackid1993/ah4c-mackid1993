@@ -28,7 +28,7 @@ const (
 	stallReadGap         = 500 * time.Millisecond
 	srcStallReconnect    = 5 * time.Second
 	srcReconnectBackoff  = 2 * time.Second
-	maxUnhealthyDuration = 5 * time.Minute // cold LinkPi reboot can take a while
+	maxUnhealthyDuration = 15 * time.Second
 	chunkSize            = 32 * 1024
 	queueDepth           = 64
 )
@@ -48,9 +48,6 @@ type stallTolerantReader struct {
 	label       string
 }
 
-// newStallTolerantReader accepts a nil initial body — useful when the
-// upstream encoder may still be booting. The producer will call reconnectFn
-// to obtain the first connection.
 func newStallTolerantReader(body io.ReadCloser, reconnectFn func() (io.ReadCloser, error), label string) *stallTolerantReader {
 	s := &stallTolerantReader{
 		chunks:      make(chan []byte, queueDepth),
@@ -83,16 +80,9 @@ func (s *stallTolerantReader) producer() {
 		s.bodyMu.Lock()
 		body := s.body
 		s.bodyMu.Unlock()
-
-		var n int
-		var err error
-		if body == nil {
-			err = fmt.Errorf("no upstream body yet")
-		} else {
-			ctx, cancel := context.WithTimeout(context.Background(), srcStallReconnect)
-			n, err = readWithDeadline(ctx, body, chunk)
-			cancel()
-		}
+		ctx, cancel := context.WithTimeout(context.Background(), srcStallReconnect)
+		n, err := readWithDeadline(ctx, body, chunk)
+		cancel()
 		if n > 0 {
 			lastRealBytes = time.Now()
 			data := make([]byte, n)
@@ -106,16 +96,19 @@ func (s *stallTolerantReader) producer() {
 				continue
 			}
 		}
-		if err != nil && body != nil {
+		// n == 0 OR err != nil after partial read.
+		if err != nil {
 			log.Printf("[%s] source idle/error (%v); reconnecting", s.label, err)
 		}
-		if body != nil {
-			body.Close()
-		}
+		body.Close()
 		if s.reconnectFn == nil {
 			s.closeOnce.Do(func() { close(s.closed) })
 			return
 		}
+		// Try to reconnect. While this loops, DVR keeps getting NULL packets.
+		// The outer-loop budget check handles the "reconnect succeeds repeatedly
+		// but yields no real bytes" case; this inner check handles "reconnect
+		// keeps failing outright".
 		var newBody io.ReadCloser
 		for {
 			select {
@@ -132,8 +125,6 @@ func (s *stallTolerantReader) producer() {
 				newBody = nb
 				break
 			}
-			// Verbose only once every few attempts to avoid log spam during
-			// a long cold-boot.
 			log.Printf("[%s] reconnect failed: %v", s.label, rerr)
 			select {
 			case <-time.After(srcReconnectBackoff):
@@ -141,7 +132,7 @@ func (s *stallTolerantReader) producer() {
 				return
 			}
 		}
-		log.Printf("[%s] connected", s.label)
+		log.Printf("[%s] reconnected", s.label)
 		s.bodyMu.Lock()
 		s.body = newBody
 		s.bodyMu.Unlock()
